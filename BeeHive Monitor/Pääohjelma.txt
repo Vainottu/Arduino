@@ -1,0 +1,121 @@
+#include <DHT.h>
+#include <Ethernet.h>
+#include "HX711.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+#define DHTPIN 9         // Pin mistä luetaan
+#define DHTTYPE DHT11    // Anturi mitä käytetään
+
+DHT dht(DHTPIN, DHTTYPE);
+
+byte mac[] = {  }; // Ethernet shieldin mac osoite
+EthernetClient client;
+
+const char *serverAddress = ""; // Palvelimen osoite
+const int serverPort = 80;
+unsigned long previousMillis = 0;
+const long interval = 600000; // 20 minuutin välein
+//const long interval = 10000;
+
+#define calibration_factor -25050.0 // Muutetaan arvo joka saadaan calibrointi ohjelmasta
+#define LOADCELL_DOUT_PIN  3
+#define LOADCELL_SCK_PIN  2
+
+HX711 scale;
+
+// OneWire configuration
+#define ONE_WIRE_BUS 8
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("DHT sensor reading program");
+
+  dht.begin();
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(calibration_factor);
+
+  Ethernet.begin(mac);
+  while (!Ethernet.begin(mac)) {
+    Serial.println("Ethernet connection failed");
+    delay(1000);
+  }
+  Serial.println("Connected to Ethernet");
+
+  sensors.begin(); // Initialize OneWire temperature sensors
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    // Resetoidaan anturit ennen lukemista
+    dht.begin();
+
+    float humidity = dht.readHumidity();
+    float insideTemperature = dht.readTemperature();
+
+    // Katsotaan onko jokin failed
+    if (isnan(humidity) || isnan(insideTemperature)) {
+      Serial.println("Datan luku epäonnistu!");
+    } else {
+      Serial.print("Inside Temperature: ");
+      Serial.print(insideTemperature);
+      Serial.print(" °C\t");
+
+      Serial.print("Humidity: ");
+      Serial.print(humidity);
+      Serial.print(" %");
+
+      // Read outside temperature
+      sensors.requestTemperatures();
+      float outsideTemperature = sensors.getTempCByIndex(0);
+      
+      Serial.print(" Outside Temperature: ");
+      Serial.print(outsideTemperature);
+      Serial.print(" °C");
+
+      float weight = scale.get_units(); // Haetaan painolukema
+
+      Serial.print(" Weight: ");
+      Serial.print(weight);
+      Serial.println(" kg");
+
+      sendSensorData(insideTemperature, humidity, outsideTemperature, weight);
+    }
+  }
+
+  delay(2000); // Odotetaan ennen seuraavaa lukua
+}
+
+void sendSensorData(float insideTemperature, float humidity, float outsideTemperature, float weight) {
+  if (client.connect(serverAddress, serverPort)) {
+    // Create the http get request
+    String url = "/BeehiveTest/insert_data.php"; // URL where the PHP script is located
+    url += "?hiveID=1111"; // Add hive ID to the URL
+    url += "&insideTemp=" + String(insideTemperature);
+    url += "&insideHumidity=" + String(humidity);
+    url += "&outsideTemp=" + String(outsideTemperature);
+    url += "&weight=" + String(weight);
+
+    // Send the GET request
+    client.print("GET " + url + " HTTP/1.1\r\n" +
+                 "Host: " + serverAddress + "\r\n" +
+                 "Connection: close\r\n\r\n");
+    delay(10);
+
+    // Read and print the response from the server
+    while (client.available()) {
+      String line = client.readStringUntil('\r');
+      Serial.println(line);
+    }
+
+    client.stop();
+  } else {
+    Serial.println("Connection to server failed");
+  }
+}
